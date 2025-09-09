@@ -43,7 +43,14 @@ class LammpsWriter:
             self._write_coeffs(f, 'Masses', 'atom', ['mass'], "{type_id} {mass:.6f} # {name}")
             self._write_coeffs(f, 'Pair Coeffs', 'atom', ['epsilon', 'sigma'], "{type_id} {epsilon:.6f} {sigma:.6f} # {name}")
             self._write_coeffs(f, 'Bond Coeffs', 'bond', ['Kb', 'b0'], "{type_id} {Kb:.4f} {b0:.4f} # {name_str}")
-            self._write_coeffs(f, 'Angle Coeffs', 'angle', ['Kth', 'th0'], "{type_id} {Kth:.4f} {th0:.4f} # {name_str}")
+            
+            # Conditionally write angle coeffs based on style
+            angle_style = self.coeffs['angle']['style']
+            if angle_style == 'charmm':
+                self._write_coeffs(f, 'Angle Coeffs', 'angle', ['Kth', 'th0', 'Kub', 's0'], "{type_id} {Kth:.4f} {th0:.4f} {Kub:.4f} {s0:.4f} # {name_str}")
+            elif angle_style == 'harmonic':
+                 self._write_coeffs(f, 'Angle Coeffs', 'angle', ['Kth', 'th0'], "{type_id} {Kth:.4f} {th0:.4f} # {name_str}")
+            
             self._write_dihedral_coeffs(f)
             self._write_topology(f)
 
@@ -58,7 +65,8 @@ class LammpsWriter:
             fudgeLJ, fudgeQQ = float(defaults[3]), float(defaults[4])
         special_bonds_line = f"special_bonds   lj 0.0 0.0 {fudgeLJ} coul 0.0 0.0 {fudgeQQ}"
 
-        # Determine dihedral style
+        # Determine angle and dihedral styles
+        angle_style_line = f"angle_style     {self.coeffs['angle']['style']}"
         dihedral_style_line = f"dihedral_style  {self.coeffs['dihedral']['style']}"
 
         template_path = Path(__file__).parent / 'lammps_template.in'
@@ -68,6 +76,7 @@ class LammpsWriter:
         text = template.replace('{data_filename}', Path(out_path).stem + '.data')
         text = text.replace('{trajectory_basename}', Path(out_path).stem)
         text = text.replace('{special_bonds_line}', special_bonds_line)
+        text = text.replace('{angle_style_line}', angle_style_line)
         text = text.replace('{dihedral_style_line}', dihedral_style_line)
 
         with open(out_path, 'w') as f:
@@ -92,20 +101,39 @@ class LammpsWriter:
         
         # Angles
         all_angle_types = self.ff['globals']['angletypes']
-        angle_params = {(p[0], p[1], p[2]): {'th0': float(p[4]), 'Kth': float(p[5]) * KCAL_PER_KJ} for p in all_angle_types}
+        angle_params = {}
+        angle_func_types = []
+        for p in all_angle_types:
+            key = (p[0], p[1], p[2])
+            func = int(p[3])
+            angle_func_types.append(func)
+            
+            if func == 5: # CHARMM with Urey-Bradley
+                kub = float(p[7]) * KCAL_PER_KJ / (A_PER_NM**2) if len(p) > 7 else 0.0
+                s0 = float(p[6]) * A_PER_NM if len(p) > 6 else 0.0
+                angle_params[key] = {'th0': float(p[4]), 'Kth': float(p[5]) * KCAL_PER_KJ, 'Kub': kub, 's0': s0}
+            elif func == 1: # Standard Harmonic
+                angle_params[key] = {'th0': float(p[4]), 'Kth': float(p[5]) * KCAL_PER_KJ}
+            # Add other func types here as needed
+
+        # Determine dominant angle style
+        func_counts = Counter(angle_func_types)
+        dominant_func = func_counts.most_common(1)[0][0] if func_counts else 5
+        style_map = {1: 'harmonic', 5: 'charmm'}
+        lammps_style = style_map.get(dominant_func, 'charmm')
+        print(f"    -> Detected GROMACS angle function type {dominant_func}, setting LAMMPS style to '{lammps_style}'.")
+
         used_angle_types = sorted({self._find_parameter_key(a, angle_params, 3) for a in self.system['angles']})
         self.type_maps['angle'] = {name: i + 1 for i, name in enumerate(used_angle_types)}
-        self.coeffs['angle'] = {name: angle_params[name] for name in used_angle_types}
+        self.coeffs['angle'] = {'style': lammps_style, 'params': {name: angle_params[name] for name in used_angle_types}}
         
         # Dihedrals
         all_dihedral_params = self.ff['globals']['processed_dihedrals']
         used_dihedral_keys = {self._find_parameter_key(d, all_dihedral_params, 4) for d in self.system['dihedrals']}
         used_dihedrals = {key: all_dihedral_params[key] for key in used_dihedral_keys}
         
-        # Determine dominant dihedral style
         func_counts = Counter(term['func'] for params in used_dihedrals.values() for term in params)
         dominant_func = func_counts.most_common(1)[0][0] if func_counts else 9
-        
         style_map = {9: 'fourier', 3: 'charmm', 4: 'charmm', 1: 'multi/harmonic'}
         lammps_style = style_map.get(dominant_func, 'fourier')
         print(f"    -> Detected GROMACS dihedral function type {dominant_func}, setting LAMMPS style to '{lammps_style}'.")
@@ -116,41 +144,24 @@ class LammpsWriter:
 
 
     def _generate_patterns(self, types: List[str]) -> List[tuple]:
-        """
-        Generates a list of patterns from most specific to most general by
-        iteratively replacing atom types with wildcards ('X').
-        """
         num_types = len(types)
         patterns = []
-        
         for num_wildcards in range(num_types + 1):
-            wildcard_positions_iter = combinations(range(num_types), num_wildcards)
-            for positions in wildcard_positions_iter:
+            for positions in combinations(range(num_types), num_wildcards):
                 pattern = list(types)
                 for pos in positions:
                     pattern[pos] = 'X'
                 patterns.append(tuple(pattern))
-                
         return patterns
 
     def _find_parameter_key(self, atoms: List[int], param_dict: Dict, num_atoms: int) -> tuple:
-        """
-        Finds the best-matching parameter key by checking a prioritized list of
-        patterns with wildcards, for both forward and reversed atom types.
-        """
         types = [self.global_atom_map[i]['type'] for i in atoms[:num_atoms]]
-        
         forward_patterns = self._generate_patterns(types)
         reversed_patterns = self._generate_patterns(types[::-1])
-
-        # Combine and prioritize. Using dict.fromkeys to remove duplicates 
-        # while preserving the order of appearance.
         patterns_to_check = list(dict.fromkeys(forward_patterns + reversed_patterns))
-
         for pattern in patterns_to_check:
             if pattern in param_dict:
                 return pattern
-                
         raise ValueError(f"No matching parameter found for types: {'-'.join(types)}")
 
     def _write_header(self, f):
@@ -169,10 +180,16 @@ class LammpsWriter:
 
     def _write_coeffs(self, f, title, coeff_type, param_keys, fmt_str):
         f.write(f"\n{title}\n\n")
+        
+        # Correctly access parameters which are nested one level deeper for angles/dihedrals
+        param_source = self.coeffs[coeff_type]
+        if 'params' in param_source:
+             param_source = param_source['params']
+
         for name, type_id in self.type_maps[coeff_type].items():
-            params = self.coeffs[coeff_type][name]
+            params = param_source[name]
             fmt_dict = {'type_id': type_id, 'name': name}
-            fmt_dict.update({key: params[key] for key in param_keys})
+            fmt_dict.update({key: params.get(key, 0.0) for key in param_keys}) # Use .get for safety
             if isinstance(name, tuple):
                 fmt_dict['name_str'] = '-'.join(name)
             f.write(fmt_str.format(**fmt_dict) + "\n")
@@ -220,7 +237,7 @@ class LammpsWriter:
 
         f.write("\nAngles\n\n")
         for i, a in enumerate(self.system['angles']):
-            key = self._find_parameter_key(a, self.coeffs['angle'], 3)
+            key = self._find_parameter_key(a, self.coeffs['angle']['params'], 3)
             type_id = self.type_maps['angle'][key]
             f.write(f"{i + 1} {type_id} {a[0]} {a[1]} {a[2]}\n")
             
