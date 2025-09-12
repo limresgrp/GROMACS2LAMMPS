@@ -2,7 +2,7 @@
 Main executable script for the GROMACS to LAMMPS converter.
 
 This script orchestrates the conversion process by:
-1. Parsing command-line arguments for input/output files.
+1. Parsing command-line arguments for input/output files and simulation settings.
 2. Calling the GROMACS parser to read topology and structure files.
 3. Calling the system builder to construct the full system from molecule definitions.
 4. Calling the LAMMPS writer to generate the final .data and .in files.
@@ -19,7 +19,7 @@ from gmx_parser import GromacsParser
 from system_builder import SystemBuilder
 from lammps_writer import LammpsWriter
 
-def main(gro_file: str, top_file: str, out_folder: Optional[str] = None):
+def main(gro_file: str, top_file: str, out_folder: Optional[str] = None, **kwargs):
     """Main function to run the conversion."""
     print("=====================================================")
     print("=== GROMACS to LAMMPS Conversion Script           ===")
@@ -55,9 +55,9 @@ def main(gro_file: str, top_file: str, out_folder: Optional[str] = None):
     
     base_name = Path(gro_file).stem
     lammps_data_filename = Path(out_folder) / f"{base_name}.data"
-    lammps_in_filename = Path(out_folder) / f"{base_name}.in"
+    lammps_in_filename = Path(out_folder) / f"in.{base_name}"
     
-    writer = LammpsWriter(parsed_ff, system_topology, gro_atoms, box_dims)
+    writer = LammpsWriter(parsed_ff, system_topology, gro_atoms, box_dims, **kwargs)
     writer.write_lammps_data(lammps_data_filename)
     writer.write_lammps_in(lammps_in_filename)
 
@@ -75,18 +75,59 @@ if __name__ == '__main__':
         formatter_class=argparse.RawTextHelpFormatter
     )
     cli_parser.add_argument(
-        "gro", 
+        "gro",
         help="Path to the GROMACS coordinate file (.gro)."
     )
     cli_parser.add_argument(
-        "top", 
+        "top",
         help="Path to the top-level GROMACS topology file (.top)."
     )
     cli_parser.add_argument(
-        "-o", "--output", 
+        "-o", "--output",
         default=None,
         help="Path for the output folder. Defaults to the same folder as the .gro file."
     )
     
+    # --- Simulation Control Arguments ---
+    sim_group = cli_parser.add_argument_group('Simulation Settings')
+    sim_group.add_argument(
+        '--protocol',
+        default='min-nvt-npt',
+        help="Define the simulation protocol as a hyphen-separated string.\n"
+             "Valid stages: 'min' (minimization), 'nvt' (equilibration), 'npt' (production).\n"
+             "Examples: 'min-npt', 'nvt-npt', 'min', 'npt'."
+    )
+    sim_group.add_argument(
+        '--thermostat',
+        default='nose-hoover',
+        choices=['nose-hoover', 'berendsen', 'langevin'],
+        help="Choose the thermostat for NVT or NPT stages."
+    )
+    sim_group.add_argument(
+        '--barostat',
+        default='nose-hoover',
+        choices=['nose-hoover', 'berendsen'],
+        help="Choose the barostat (only used for the 'npt' stage)."
+    )
+    sim_group.add_argument(
+        '--shake',
+        action='store_true',
+        help="Enable SHAKE algorithm to constrain bonds involving hydrogen atoms."
+    )
+    sim_group.add_argument(
+        '--cm-removal',
+        action='store_true',
+        help="Enable center-of-mass motion removal every 100 steps."
+    )
+    
     args = cli_parser.parse_args()
-    main(gro_file=args.gro, top_file=args.top, out_folder=args.output)
+    
+    sim_kwargs = {
+        "protocol": args.protocol,
+        "thermostat": args.thermostat,
+        "barostat": args.barostat,
+        "use_shake": args.shake,
+        "use_cm_removal": args.cm_removal
+    }
+    
+    main(gro_file=args.gro, top_file=args.top, out_folder=args.output, **sim_kwargs)

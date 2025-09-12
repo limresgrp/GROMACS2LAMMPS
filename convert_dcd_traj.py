@@ -66,7 +66,6 @@ def process_trajectory(
     """
     print("--- Loading trajectory ---")
     try:
-        # Corrected format from 'LAMMPS' to 'LAMMPSDCD'
         universe = mda.Universe(data_file, dcd_file, format='LAMMPS')
     except Exception as e:
         print(f"Error loading files: {e}")
@@ -176,7 +175,7 @@ if __name__ == '__main__':
         description="Post-process a LAMMPS DCD trajectory. This script can make molecules whole, align the trajectory, and stride the output.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("data_file", help="Path to the LAMMPS .data file (used for topology and masses).")
+    parser.add_argument("data_file", help="Path to the LAMMPS data. file (used for topology and masses).")
     parser.add_argument("dcd_file", help="Path to the input LAMMPS .dcd trajectory file.")
     parser.add_argument(
         "-o", "--output", default="output.xtc",
