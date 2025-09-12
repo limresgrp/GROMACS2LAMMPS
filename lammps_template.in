@@ -25,29 +25,12 @@ thermo          1000
 thermo_style    custom step temp pe etotal press lx ly lz vol
 timestep        2.0          # Timestep in femtoseconds
 
-# --- Minimization (Optional but Recommended) ---
-print "--- Starting Energy Minimization ---"
-minimize        1.0e-4 1.0e-6 1000 10000
-print "--- Minimization Complete ---"
+# --- Optional Fixes (applied globally) ---
+{shake_command}
+{cm_removal_command}
 
-# --- Equilibration (NVT Example) ---
-print "--- Starting NVT Equilibration ---"
-reset_timestep  0
-velocity        all create 300.0 4928459 rot yes dist gaussian
-fix             1 all nvt temp 300.0 300.0 $(100.0*dt)
-run             50000  # 100 ps
-unfix           1
-print "--- NVT Equilibration Complete ---"
+# --- Simulation Protocol ---
+# The following script is generated based on the --protocol option.
+{simulation_script}
 
-# --- Production (NPT Example) ---
-print "--- Starting NPT Production ---"
-reset_timestep  0
-fix             1 all npt temp 300.0 300.0 $(100.0dt) iso 1.0 1.0 $(1000.0dt)
-
-# --- Trajectory Output ---
-dump            my_dcd all dcd 5000 {trajectory_basename}.dcd
-dump_modify     my_dcd unwrap yes
-
-# --- Run ---
-run             250000 # 500 ps
-print "--- Simulation Finished ---"
+print "--- All simulation stages complete ---"
